@@ -14,6 +14,9 @@ class LogForwardingPlugin {
     };
   }
 
+  get conf() {
+    return this.serverless.service.service.custom.logForwarding
+  }
 
   /**
    * Updates CloudFormation resources with log forwarding
@@ -21,11 +24,12 @@ class LogForwardingPlugin {
   updateResources() {
     // check if stage is specified in config
     const service = this.serverless.service;
+    const conf = this.conf
     const stage = this.options.stage && this.options.stage.length > 0
       ? this.options.stage
       : service.provider.stage;
-    if (service.custom.logForwarding.stages &&
-      service.custom.logForwarding.stages.indexOf(stage) === -1) {
+    if (conf.stages &&
+      conf.stages.indexOf(stage) === -1) {
       this.serverless.cli.log(`Log Forwarding is ignored for ${stage} stage`);
       return;
     }
@@ -51,14 +55,21 @@ class LogForwardingPlugin {
   createResourcesObj() {
     const service = this.serverless.service;
     // Checks if the serverless file is setup correctly
-    if (service.custom.logForwarding.destinationARN == null) {
+    const conf = this.conf;
+    if (conf.destinationARN == null && conf.destinationFn == null) {
       throw new Error('Serverless-log-forwarding is not configured correctly. Please see README for proper setup.');
     }
-    const filterPattern = service.custom.logForwarding.filterPattern || '';
+    const filterPattern = conf.filterPattern || '';
     // Get options and parameters to make resources object
-    const arn = service.custom.logForwarding.destinationARN;
+    const arn = conf.destinationARN;
+    const destinationFnName = conf.destinationFn;
     // Get list of all functions in this lambda
-    const functions = _.keys(service.functions);
+    let functions = _.keys(service.functions);
+    if (destinationFnName) {
+      // avoid creating a loop by subscribing to destination function's logs
+      functions = functions.filter(name => name !== destinationFnName);
+    }
+
     const principal = `logs.${service.provider.region}.amazonaws.com`;
     // Generate resources object for each function
     // Only one lambda permission is needed
@@ -66,12 +77,19 @@ class LogForwardingPlugin {
       LogForwardingLambdaPermission: {
         Type: 'AWS::Lambda::Permission',
         Properties: {
-          FunctionName: arn,
+          FunctionName: arn || destinationFnName,
           Action: 'lambda:InvokeFunction',
           Principal: principal,
         },
       },
     };
+
+    if (destinationFnName) {
+      resourceObj.LogForwardingLambdaPermission.DependsOn = [
+        this.provider.naming.getLambdaLogicalId(destinationFnName)
+      ];
+    }
+
     for (let i = 0; i < functions.length; i += 1) {
       /* merge new SubscriptionFilter with current resources object */
       const subscriptionFilter = this.makeSubscriptionFilter(arn, functions[i], filterPattern);
